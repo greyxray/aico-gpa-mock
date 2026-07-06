@@ -37,7 +37,7 @@ SOURCES = [
     "IOSCO",
 ]
 
-APP_VERSION = "2026-07-03-v5"
+APP_VERSION = "2026-07-06-v8"
 MAILING_LIST = "gpa-daily-regulatory-news@db.com"
 SHAREPOINT_ARCHIVE = "/GPA/Daily-News/Published-Digests/"
 EXPERT_REVIEW_LIST = "gpa-subject-matter-experts@db.com"
@@ -287,16 +287,16 @@ def selected_articles(today_only: bool = False, include_sent: bool = False) -> l
 
 
 def generate_email(articles: list[dict]) -> str:
-    top_articles = sorted(
+    sorted_articles = sorted(
         articles,
         key=lambda item: {"High": 0, "Medium": 1, "Low": 2}.get(item["importance"], 9),
-    )[:5]
+    )
 
-    if not top_articles:
+    if not sorted_articles:
         return "No articles selected for today's digest."
 
     items = []
-    for idx, article in enumerate(top_articles, start=1):
+    for idx, article in enumerate(sorted_articles, start=1):
         items.append(
             dedent(
                 f"""
@@ -522,6 +522,7 @@ def render_dashboard() -> None:
             "date": article["date"],
             "source": article["source"],
             "title": article["title"],
+            "url": article["url"],
             "summary": article["summary"],
             "category": article["category"],
             "was_published": "Yes" if article["status"] == "Sent" else "No",
@@ -529,26 +530,76 @@ def render_dashboard() -> None:
         for article in filtered_articles
     ]
 
-    edited = st.data_editor(
+    edited_picks = st.data_editor(
         rows,
-        key="dashboard_article_picker",
+        key="dashboard_pick_editor",
         hide_index=True,
         width="stretch",
-        disabled=["id", "date", "source", "title", "summary", "category", "was_published"],
+        disabled=["id", "date", "source", "title", "url", "summary", "category", "was_published"],
         column_config={
-            "pick": st.column_config.CheckboxColumn("Pick for initial draft"),
+            "pick": st.column_config.CheckboxColumn("Pick for initial draft", width="small"),
+            "id": st.column_config.TextColumn("Article ID", width="small"),
             "title": st.column_config.TextColumn("Title", width="large"),
+            "url": st.column_config.LinkColumn("Link", display_text="Open", width="small"),
             "summary": st.column_config.TextColumn("Summary", width="large"),
             "category": st.column_config.SelectboxColumn("Category", options=CATEGORIES, width="medium"),
             "was_published": st.column_config.TextColumn("Was published", width="small"),
         },
     )
 
-    picked_ids = {row["id"] for row in as_records(edited) if row["pick"]}
-    picked_ids_in_order = [article["id"] for article in filtered_articles if article["id"] in picked_ids]
     by_id = {article["id"]: article for article in st.session_state.articles}
+    picked_ids = {row["id"] for row in as_records(edited_picks) if row["pick"]}
     for article in filtered_articles:
         by_id[article["id"]]["editor_pick"] = article["id"] in picked_ids
+
+    if filtered_articles:
+        st.markdown("#### Edit one dashboard article")
+        st.caption("Select one article, edit allowed fields, then submit. The table above is read-only.")
+        article_options = [article["id"] for article in filtered_articles]
+        selected_article_id = st.selectbox(
+            "Article ID",
+            article_options,
+            format_func=lambda article_id: f"{article_id} - {by_id[article_id]['title']}",
+            key="dashboard_selected_article",
+        )
+        selected_article = by_id[selected_article_id]
+
+        with st.form(f"dashboard_article_form_{selected_article_id}"):
+            c1, c2 = st.columns([1.3, 1])
+            with c1:
+                st.text_input("Title", value=selected_article["title"], disabled=True)
+                st.link_button("Open publication", selected_article["url"])
+                new_summary = st.text_area(
+                    "Summary",
+                    value=selected_article["summary"],
+                    height=140,
+                )
+                new_expert_notes = st.text_area(
+                    "Expert note",
+                    value=selected_article.get("expert_notes", ""),
+                    height=90,
+                )
+            with c2:
+                st.text_input("Article ID", value=selected_article["id"], disabled=True)
+                st.text_input("Source", value=selected_article["source"], disabled=True)
+                st.text_input("Date", value=selected_article["date"], disabled=True)
+                st.text_input("Was published", value="Yes" if selected_article["status"] == "Sent" else "No", disabled=True)
+                new_category = st.selectbox(
+                    "Category",
+                    CATEGORIES,
+                    index=CATEGORIES.index(selected_article["category"]) if selected_article["category"] in CATEGORIES else 0,
+                )
+
+            submitted = st.form_submit_button("Submit article changes", type="primary")
+
+        if submitted:
+            selected_article["summary"] = new_summary
+            selected_article["expert_notes"] = new_expert_notes
+            selected_article["category"] = new_category
+            st.success(f"Updated {selected_article_id}.")
+            st.rerun()
+
+    picked_ids_in_order = [article["id"] for article in filtered_articles if article["id"] in picked_ids]
 
     c1, c2 = st.columns([1, 2])
     if c1.button("Create shortlist page", type="primary", width="stretch"):
@@ -559,7 +610,16 @@ def render_dashboard() -> None:
             st.session_state.shortlists[shortlist_id] = {
                 "id": shortlist_id,
                 "created": date.today().isoformat(),
+                "status": "Draft",
                 "article_ids": picked_ids_in_order,
+                "review": {
+                    article_id: {
+                        "recommended_for_publishing": True,
+                        "selected_for_publishing": False,
+                        "expert_note": by_id[article_id].get("expert_notes", ""),
+                    }
+                    for article_id in picked_ids_in_order
+                },
             }
             go_to(f"Shortlist:{shortlist_id}")
     c2.caption("Creating a shortlist generates a dedicated workspace page that can be shared with editors and experts.")
@@ -580,8 +640,10 @@ def render_manual_entry() -> None:
         departments = st.multiselect("Departments", DEPARTMENTS, default=["GPA Banking"])
         importance = st.selectbox("Importance", ["High", "Medium", "Low", "Ignore"])
         tags = st.text_input("Tags", placeholder="comma-separated topics")
+        passed_criteria = st.checkbox("Passed criteria", value=True)
+        was_published = st.checkbox("Was published", value=False)
         summary = st.text_area("Initial summary", height=110)
-        submitted = st.form_submit_button("Add to editor queue", type="primary")
+        submitted = st.form_submit_button("Add article to database", type="primary")
 
     if submitted:
         if not title or not url:
@@ -600,15 +662,15 @@ def render_manual_entry() -> None:
                 "importance": importance,
                 "tags": tags,
                 "summary": summary or "Manual article added by editor; summary pending.",
-                "status": "New",
-                "selected": True,
-                "editor_pick": True,
+                "status": "Sent" if was_published else "New",
+                "selected": passed_criteria,
+                "editor_pick": False,
                 "owner": "Daily editor",
                 "expert_notes": "",
                 "origin": "Manual",
             },
         )
-        st.success("Manual publication added to today's editor queue.")
+        st.success("Manual publication added to the article database.")
 
 
 def articles_for_ids(article_ids: list[str]) -> list[dict]:
@@ -616,60 +678,241 @@ def articles_for_ids(article_ids: list[str]) -> list[dict]:
     return [by_id[article_id] for article_id in article_ids if article_id in by_id]
 
 
+def parse_article_ids(raw_ids: str) -> list[str]:
+    normalized = raw_ids.replace(",", " ").replace("\n", " ")
+    seen = set()
+    article_ids = []
+    for article_id in normalized.split():
+        article_id = article_id.strip().upper()
+        if article_id and article_id not in seen:
+            seen.add(article_id)
+            article_ids.append(article_id)
+    return article_ids
+
+
+def ensure_shortlist_review(shortlist: dict) -> None:
+    if "status" not in shortlist:
+        shortlist["status"] = "Draft"
+    if "review" not in shortlist:
+        shortlist["review"] = {}
+    by_id = {article["id"]: article for article in st.session_state.articles}
+    for article_id in shortlist.get("article_ids", []):
+        article = by_id.get(article_id, {})
+        shortlist["review"].setdefault(
+            article_id,
+            {
+                "recommended_for_publishing": True,
+                "selected_for_publishing": False,
+                "expert_note": article.get("expert_notes", ""),
+            },
+        )
+
+
 def render_shortlist_page(shortlist_id: str) -> None:
     shortlist = st.session_state.shortlists.get(shortlist_id)
     if not shortlist:
         page_header("Shortlist not found", "This generated shortlist page no longer exists.")
         return
+    ensure_shortlist_review(shortlist)
 
     page_header(
         f"Shortlist {shortlist_id}",
         "Shared review workspace for the editor and experts. Summaries, categories, and notes can be adjusted here.",
     )
     st.caption(f"Generated page: /shortlists/{shortlist_id}")
+    st.markdown(f"**Status:** {shortlist['status']}")
 
     articles = articles_for_ids(shortlist["article_ids"])
+    review = shortlist["review"]
+    recommended_count = sum(
+        1 for article in articles if review.get(article["id"], {}).get("recommended_for_publishing")
+    )
+    selected_count = sum(
+        1 for article in articles if review.get(article["id"], {}).get("selected_for_publishing")
+    )
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Recommended", recommended_count)
+    c2.metric("Selected for publishing", selected_count)
+    c3.metric("Shortlist articles", len(articles))
+    if selected_count > 4:
+        st.warning("More than four articles are selected for publishing. The draft will still use the selected articles.")
+
+    share_col, add_col = st.columns([1, 1])
+    if share_col.button("Share with experts", width="stretch"):
+        shortlist["status"] = "Shared with experts"
+        shortlist["shared_at"] = date.today().isoformat()
+        st.success(f"Mock shortlist shared with {EXPERT_REVIEW_LIST}.")
+    if add_col.button("Add more articles", width="stretch"):
+        st.session_state[f"show_add_more_{shortlist_id}"] = not st.session_state.get(
+            f"show_add_more_{shortlist_id}", False
+        )
+        st.rerun()
+
+    if st.session_state.get(f"show_add_more_{shortlist_id}", False):
+        st.markdown("#### Add from dashboard")
+        existing_ids = set(shortlist["article_ids"])
+        available = [
+            article
+            for article in st.session_state.articles
+            if article["id"] not in existing_ids and article["status"] != "Excluded"
+        ]
+        if not available:
+            st.info("No additional dashboard articles are available for this shortlist.")
+        else:
+            st.caption("Use the IDs from the dashboard/database view. Enter one or more IDs separated by commas or spaces.")
+            st.dataframe(
+                [
+                    {
+                        "id": article["id"],
+                        "date": article["date"],
+                        "source": article["source"],
+                        "title": article["title"],
+                        "category": article["category"],
+                        "was_published": "Yes" if article["status"] == "Sent" else "No",
+                    }
+                    for article in available
+                ],
+                hide_index=True,
+                width="stretch",
+                column_config={
+                    "id": st.column_config.TextColumn("Article ID", width="small"),
+                    "title": st.column_config.TextColumn("Title", width="large"),
+                    "category": st.column_config.TextColumn("Category", width="medium"),
+                    "was_published": st.column_config.TextColumn("Was published", width="small"),
+                },
+            )
+            requested_ids = st.text_input(
+                "Article IDs to add",
+                placeholder="A-1004, A-1008",
+                key=f"shortlist_add_ids_{shortlist_id}",
+            )
+            if st.button("Add selected articles to shortlist", type="primary"):
+                ids_to_add = parse_article_ids(requested_ids)
+                by_id = {article["id"]: article for article in st.session_state.articles}
+                available_ids = {article["id"] for article in available}
+                invalid_ids = [article_id for article_id in ids_to_add if article_id not in available_ids]
+                if invalid_ids:
+                    st.error(f"These IDs are not available to add: {', '.join(invalid_ids)}")
+                    return
+                for article_id in ids_to_add:
+                    if article_id not in shortlist["article_ids"]:
+                        shortlist["article_ids"].append(article_id)
+                        review[article_id] = {
+                            "recommended_for_publishing": False,
+                            "selected_for_publishing": False,
+                            "expert_note": by_id[article_id].get("expert_notes", ""),
+                        }
+                st.session_state[f"show_add_more_{shortlist_id}"] = False
+                st.success(f"Added {len(ids_to_add)} article(s) to shortlist {shortlist_id}.")
+                st.rerun()
+
     rows = [
         {
             "id": article["id"],
             "title": article["title"],
+            "source": article["source"],
+            "url": article["url"],
             "summary": article["summary"],
             "category": article["category"],
-            "expert_notes": article["expert_notes"],
+            "expert_note": review[article["id"]].get("expert_note", article.get("expert_notes", "")),
+            "recommended_for_publishing": bool(review[article["id"]].get("recommended_for_publishing")),
+            "selected_for_publishing": bool(review[article["id"]].get("selected_for_publishing")),
             "was_published": "Yes" if article["status"] == "Sent" else "No",
         }
         for article in articles
     ]
 
-    edited = st.data_editor(
+    st.dataframe(
         rows,
-        key=f"shortlist_editor_{shortlist_id}",
         hide_index=True,
         width="stretch",
-        disabled=["id", "title", "was_published"],
         column_config={
+            "id": st.column_config.TextColumn("Article ID", width="small"),
             "title": st.column_config.TextColumn("Title", width="large"),
+            "source": st.column_config.TextColumn("Source", width="medium"),
+            "url": st.column_config.LinkColumn("Link", display_text="Open", width="small"),
             "summary": st.column_config.TextColumn("Summary", width="large"),
             "category": st.column_config.SelectboxColumn("Category", options=CATEGORIES),
-            "expert_notes": st.column_config.TextColumn("Notes", width="large"),
+            "expert_note": st.column_config.TextColumn("Expert note", width="large"),
+            "recommended_for_publishing": st.column_config.CheckboxColumn("Recommended for publishing"),
+            "selected_for_publishing": st.column_config.CheckboxColumn("Selected for publishing"),
             "was_published": st.column_config.TextColumn("Was published", width="small"),
         },
     )
 
-    by_id = {article["id"]: article for article in st.session_state.articles}
-    for row in as_records(edited):
-        if row["id"] in by_id:
-            by_id[row["id"]]["summary"] = row["summary"]
-            by_id[row["id"]]["category"] = row["category"]
-            by_id[row["id"]]["expert_notes"] = row["expert_notes"]
+    st.markdown("#### Edit one article")
+    st.caption("Select one shortlist row, edit the allowed fields, then submit. The article ID, title, source, link, and publication status are read-only.")
+    article_options = [article["id"] for article in articles]
+    selected_article_id = st.selectbox(
+        "Article ID",
+        article_options,
+        format_func=lambda article_id: f"{article_id} - {next((article['title'] for article in articles if article['id'] == article_id), '')}",
+        key=f"shortlist_selected_article_{shortlist_id}",
+    )
+    selected_article = next(article for article in articles if article["id"] == selected_article_id)
+    selected_review = review[selected_article_id]
 
-    if st.button("Generate final email page", type="primary", width="stretch"):
+    with st.form(f"shortlist_row_form_{shortlist_id}_{selected_article_id}"):
+        c1, c2 = st.columns([1.3, 1])
+        with c1:
+            st.text_input("Title", value=selected_article["title"], disabled=True)
+            st.link_button("Open publication", selected_article["url"])
+            new_summary = st.text_area(
+                "Summary",
+                value=selected_article["summary"],
+                height=140,
+            )
+            new_expert_note = st.text_area(
+                "Expert note",
+                value=selected_review.get("expert_note", selected_article.get("expert_notes", "")),
+                height=90,
+            )
+        with c2:
+            st.text_input("Article ID", value=selected_article["id"], disabled=True)
+            st.text_input("Source", value=selected_article["source"], disabled=True)
+            st.text_input("Was published", value="Yes" if selected_article["status"] == "Sent" else "No", disabled=True)
+            new_category = st.selectbox(
+                "Category",
+                CATEGORIES,
+                index=CATEGORIES.index(selected_article["category"]) if selected_article["category"] in CATEGORIES else 0,
+            )
+            new_recommended = st.checkbox(
+                "Recommended for publishing",
+                value=bool(selected_review.get("recommended_for_publishing")),
+            )
+            new_selected = st.checkbox(
+                "Selected for publishing",
+                value=bool(selected_review.get("selected_for_publishing")),
+            )
+
+        submitted = st.form_submit_button("Submit article changes", type="primary")
+
+    if submitted:
+        by_id = {article["id"]: article for article in st.session_state.articles}
+        by_id[selected_article_id]["summary"] = new_summary
+        by_id[selected_article_id]["category"] = new_category
+        by_id[selected_article_id]["expert_notes"] = new_expert_note
+        review[selected_article_id] = {
+            "expert_note": new_expert_note,
+            "recommended_for_publishing": new_recommended,
+            "selected_for_publishing": new_selected,
+        }
+        st.success(f"Updated {selected_article_id}.")
+        st.rerun()
+
+    selected_articles_for_email = [
+        article for article in articles if review.get(article["id"], {}).get("selected_for_publishing")
+    ]
+    if st.button("Present draft email", type="primary", width="stretch"):
+        if not selected_articles_for_email:
+            st.error("Select at least one article for publishing before creating the draft email.")
+            return
         email_id = f"E-{len(st.session_state.final_emails) + 1:03d}"
         st.session_state.final_emails[email_id] = {
             "id": email_id,
             "shortlist_id": shortlist_id,
-            "article_ids": shortlist["article_ids"],
-            "body": generate_email(articles),
+            "article_ids": [article["id"] for article in selected_articles_for_email],
+            "body": generate_email(selected_articles_for_email),
         }
         go_to(f"Email:{email_id}")
 
@@ -692,27 +935,20 @@ def render_final_email_page(email_id: str) -> None:
 
     final_email["body"] = st.text_area("Editable final email text", value=final_email["body"], height=460)
 
-    c1, c2 = st.columns(2)
-    with c1:
-        st.caption(f"Sends a draft only to {EXPERT_REVIEW_LIST}. It does not go to the final distribution list and does not archive to SharePoint.")
-        if st.button("Send draft to experts", width="stretch"):
-            st.success(f"Mock draft sent to {EXPERT_REVIEW_LIST}.")
-
-    with c2:
-        st.caption(f"Final action: sends to {MAILING_LIST} and archives the email to SharePoint space {SHAREPOINT_ARCHIVE}.")
-        if st.button("Send final email and archive", type="primary", width="stretch"):
-            for article in articles:
-                article["status"] = "Sent"
-            st.session_state.sent_digests.insert(
-                0,
-                {
-                    "date": date.today().isoformat(),
-                    "subject": "Daily Banking Regulatory News",
-                    "article_count": len(articles),
-                    "sharepoint_path": f"{SHAREPOINT_ARCHIVE}{date.today().isoformat()}-digest.html",
-                },
-            )
-            st.success(f"Mock final email sent to {MAILING_LIST} and archived to {SHAREPOINT_ARCHIVE}.")
+    st.caption(f"Final action: sends to {MAILING_LIST} and archives the email to SharePoint space {SHAREPOINT_ARCHIVE}.")
+    if st.button("Send final email and archive", type="primary", width="stretch"):
+        for article in articles:
+            article["status"] = "Sent"
+        st.session_state.sent_digests.insert(
+            0,
+            {
+                "date": date.today().isoformat(),
+                "subject": "Daily Banking Regulatory News",
+                "article_count": len(articles),
+                "sharepoint_path": f"{SHAREPOINT_ARCHIVE}{date.today().isoformat()}-digest.html",
+            },
+        )
+        st.success(f"Mock final email sent to {MAILING_LIST} and archived to {SHAREPOINT_ARCHIVE}.")
 
 
 def render_review() -> None:
