@@ -1,0 +1,12 @@
+[project]
+name = "aico-gpa-mock"
+version = "0.1.0"
+description = "Minimal Streamlit mock-up for GPA banking news triage and daily digest workflow."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "streamlit>=1.36",
+]
+
+[tool.uv]
+package = false
