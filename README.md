@@ -16,6 +16,20 @@ No real scraping, LLM, email, or SharePoint integration is performed. All data i
 
 ## Run
 
+Create and sync the local virtual environment with `uv`:
+
 ```bash
-uv run streamlit run app.py
+UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv uv sync
+```
+
+Run the Streamlit mock-up:
+
+```bash
+UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv uv run streamlit run app.py --server.port 8501 --server.headless true
+```
+
+Then open:
+
+```text
+http://localhost:8501
 ```
